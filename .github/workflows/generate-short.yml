@@ -1,0 +1,118 @@
+
+name: Generate Hindi Short Package
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "40 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Generate content with Gemini
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          api_key = os.environ.get("GEMINI_API_KEY")
+          if not api_key:
+              raise SystemExit("GEMINI_API_KEY secret is missing.")
+
+          model = "gemini-3.5-flash-lite"
+          endpoint = (
+              "https://generativelanguage.googleapis.com/v1beta/"
+              f"models/{model}:generateContent"
+          )
+
+          prompt = """
+          You create original Hindi animated stories for the YouTube channel
+          STORIES WITH AI (@stories_with_ai-123).
+
+          Create ONE original YouTube Short package.
+          Requirements:
+          - Natural Hindi narration for 45–60 seconds.
+          - A strong hook in the first 2 seconds.
+          - An emotional, funny, or surprising ending.
+          - 5–7 numbered scenes with approximate timestamps.
+          - Detailed visual prompt for every scene.
+          - Keep character appearance consistent across scenes.
+          - Include title, description, hashtags, and thumbnail concept.
+          - Include voiceover and subtitle guidance.
+          - Use original characters and plots; do not copy existing stories.
+          - Do not claim that any video or image has been rendered.
+          - Return clear Markdown, not JSON.
+          """
+
+          payload = {
+              "contents": [{
+                  "parts": [{"text": prompt}]
+              }],
+              "generationConfig": {
+                  "temperature": 0.9,
+                  "maxOutputTokens": 6000
+              }
+          }
+
+          request = urllib.request.Request(
+              endpoint + "?key=" + api_key,
+              data=json.dumps(payload).encode("utf-8"),
+              headers={"Content-Type": "application/json"},
+              method="POST"
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=180) as response:
+                  result = json.loads(response.read().decode("utf-8"))
+          except Exception as exc:
+              raise SystemExit(
+                  f"Gemini request failed: {type(exc).__name__}. "
+                  "Check API access, model availability, and quota."
+              )
+
+          candidates = result.get("candidates", [])
+          if not candidates:
+              raise SystemExit("Gemini returned no content.")
+
+          parts = candidates[0].get("content", {}).get("parts", [])
+          story = "\n".join(
+              part["text"] for part in parts if "text" in part
+          ).strip()
+
+          if not story:
+              raise SystemExit("Gemini returned empty text.")
+
+          output = Path("output")
+          output.mkdir(exist_ok=True)
+
+          now = datetime.now(timezone.utc)
+          filename = output / f"short-{now:%Y-%m-%d-%H%M-UTC}.md"
+
+          filename.write_text(
+              "# STORIES WITH AI — Short Production Package\n\n"
+              f"Generated at: {now.isoformat()}\n\n"
+              "Status: Script and prompts only; video not rendered.\n\n"
+              + story + "\n",
+              encoding="utf-8"
+          )
+
+          print(f"Generated content package: {filename}")
+
+      - name: Save generated package
+        uses: actions/upload-artifact@v4
+        with:
+          name: hindi-short-package
+          path: output/*.md
+          if-no-files-found: error
+          retention-days: 14
