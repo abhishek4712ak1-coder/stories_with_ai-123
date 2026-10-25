@@ -1,0 +1,249 @@
+
+name: Generate and Render Hindi Short
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "50 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Install free rendering tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg espeak-ng fonts-noto-core
+          python -m pip install --upgrade pillow
+
+      - name: Generate story and render video
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          mkdir -p output
+          cat > render.py <<'PY'
+          import os, json, urllib.request, subprocess, textwrap
+          from pathlib import Path
+          from PIL import Image, ImageDraw, ImageFont
+
+          api_key = os.environ["GEMINI_API_KEY"]
+          model = "gemini-2.5-flash"
+          endpoint = (
+              "https://generativelanguage.googleapis.com/v1beta/"
+              f"models/{model}:generateContent?key={api_key}"
+          )
+
+          prompt = """
+          Create an original Hindi YouTube Short for STORIES WITH AI.
+          Return ONLY valid JSON with these fields:
+          {
+            "title": "short title in Hindi",
+            "description": "short description in Hindi",
+            "hashtags": ["#HindiStory", "#Shorts"],
+            "scenes": [
+              {
+                "narration": "Hindi spoken narration for this scene",
+                "caption": "short Hindi caption",
+                "visual_prompt": "English description of the scene"
+              }
+            ]
+          }
+          Create 6 scenes. Total spoken narration should be about 45 seconds.
+          Every scene narration must be in natural Hindi and advance the story.
+          Use an original plot, consistent characters, and a satisfying twist.
+          No copyrighted characters. Keep captions short.
+          """
+
+          payload = {
+              "contents": [{"parts": [{"text": prompt}]}],
+              "generationConfig": {
+                  "responseMimeType": "application/json",
+                  "temperature": 0.8,
+                  "maxOutputTokens": 5000
+              }
+          }
+
+          req = urllib.request.Request(
+              endpoint,
+              data=json.dumps(payload).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST"
+          )
+          with urllib.request.urlopen(req, timeout=180) as response:
+              data = json.loads(response.read())
+
+          parts = data["candidates"][0]["content"]["parts"]
+          story = json.loads("".join(p.get("text", "") for p in parts))
+          scenes = story.get("scenes", [])
+
+          if len(scenes) < 4:
+              raise RuntimeError("Gemini returned too few scenes.")
+          if not all(s.get("narration") and s.get("caption") for s in scenes):
+              raise RuntimeError("One or more scenes are incomplete.")
+
+          Path("output/story.json").write_text(
+              json.dumps(story, ensure_ascii=False, indent=2),
+              encoding="utf-8"
+          )
+
+          font_path = (
+              "/usr/share/fonts/truetype/noto/"
+              "NotoSansDevanagari-Regular.ttf"
+          )
+          if not Path(font_path).exists():
+              matches = list(Path("/usr/share/fonts").rglob(
+                  "NotoSansDevanagari-Regular.ttf"
+              ))
+              if not matches:
+                  raise RuntimeError("Hindi font not found.")
+              font_path = str(matches[0])
+
+          title_font = ImageFont.truetype(font_path, 54)
+          caption_font = ImageFont.truetype(font_path, 44)
+          small_font = ImageFont.truetype(font_path, 25)
+
+          W, H = 720, 1280
+          palette = [
+              (30, 43, 86), (72, 42, 91), (27, 79, 88),
+              (100, 53, 40), (47, 55, 93), (29, 83, 66)
+          ]
+
+          wav_files = []
+          durations = []
+
+          def wrap_text(draw, text, font, max_width):
+              lines, current = [], ""
+              for word in text.split():
+                  candidate = f"{current} {word}".strip()
+                  if draw.textbbox((0, 0), candidate, font=font)[2] > max_width:
+                      if current:
+                          lines.append(current)
+                      current = word
+                  else:
+                      current = candidate
+              if current:
+                  lines.append(current)
+              return lines
+
+          for i, scene in enumerate(scenes):
+              narration = scene["narration"].strip()
+              wav = f"output/voice_{i:02d}.wav"
+              subprocess.run([
+                  "espeak-ng", "-v", "hi", "-s", "145",
+                  "-w", wav, narration
+              ], check=True)
+              wav_files.append(wav)
+
+              probe = subprocess.check_output([
+                  "ffprobe", "-v", "error",
+                  "-show_entries", "format=duration",
+                  "-of", "default=noprint_wrappers=1:nokey=1",
+                  wav
+              ], text=True)
+              durations.append(float(probe.strip()))
+
+              im = Image.new("RGB", (W, H), palette[i % len(palette)])
+              d = ImageDraw.Draw(im)
+
+              # Decorative shapes create a simple motion-graphics style.
+              d.ellipse((440, 100, 800, 460), fill=(255, 194, 96))
+              d.ellipse((-160, 700, 240, 1100), fill=(104, 158, 198))
+              d.rounded_rectangle(
+                  (35, 35, W - 35, H - 35),
+                  radius=30, outline=(255, 255, 255), width=3
+              )
+
+              d.text((55, 70), "STORIES WITH AI",
+                    font=small_font, fill="white")
+              d.text((55, 130), f"SCENE {i + 1}",
+                    font=small_font, fill=(255, 220, 140))
+
+              visual = scene.get("visual_prompt", "")
+              visual_lines = wrap_text(d, visual, small_font, W - 110)[:5]
+              y = 260
+              for line in visual_lines:
+                  d.text((55, y), line, font=small_font, fill="white")
+                  y += 40
+
+              d.rounded_rectangle(
+                  (40, 790, W - 40, 1150),
+                  radius=25, fill=(15, 20, 35)
+              )
+              caption_lines = wrap_text(
+                  d, scene["caption"], caption_font, W - 110
+              )[:5]
+              y = 850
+              for line in caption_lines:
+                  d.text((55, y), line, font=caption_font, fill="white")
+                  y += 65
+
+              im.save(f"output/scene_{i:02d}.png")
+
+          # Join scene narration into a single audio track.
+          import wave
+          with wave.open(wav_files[0], "rb") as first:
+              params = first.getparams()
+          combined = "output/narration.wav"
+          with wave.open(combined, "wb") as out:
+              out.setparams(params)
+              for wav in wav_files:
+                  with wave.open(wav, "rb") as inp:
+                      if inp.getparams()[:3] != params[:3]:
+                          raise RuntimeError("Voice audio formats differ.")
+                      out.writeframes(inp.readframes(inp.getnframes()))
+
+          # Create one video clip per scene, then concatenate.
+          clips = []
+          for i, wav in enumerate(wav_files):
+              clip = f"output/clip_{i:02d}.mp4"
+              subprocess.run([
+                  "ffmpeg", "-y", "-loglevel", "error",
+                  "-loop", "1", "-framerate", "25",
+                  "-i", f"output/scene_{i:02d}.png",
+                  "-i", wav,
+                  "-vf", "scale=720:1280,format=yuv420p",
+                  "-c:v", "libx264", "-preset", "ultrafast",
+                  "-tune", "stillimage",
+                  "-c:a", "aac", "-b:a", "96k",
+                  "-shortest", "-movflags", "+faststart", clip
+              ], check=True)
+              clips.append(clip)
+
+          concat_file = Path("output/concat.txt")
+          concat_file.write_text(
+              "".join(f"file '{Path(c).resolve()}'\n" for c in clips),
+              encoding="utf-8"
+          )
+
+          subprocess.run([
+              "ffmpeg", "-y", "-loglevel", "error",
+              "-f", "concat", "-safe", "0", "-i", str(concat_file),
+              "-c:v", "libx264", "-preset", "ultrafast",
+              "-c:a", "aac", "-movflags", "+faststart",
+              "output/stories-with-ai-short.mp4"
+          ], check=True)
+
+          metadata = (
+              f"TITLE\n{story.get('title', '')}\n\n"
+              f"DESCRIPTION\n{story.get('description', '')}\n\n"
+              f"HASHTAGS\n{' '.join(story.get('hashtags', []))}\n"
+          )
+          Path("output/upload-metadata.txt").write_text(
+              metadata, encoding="utf-8"
+          )
+          print("Rendered output/stories-with-ai-short.mp4")
+          PY
+
+          python render.py
+
+      - name: Upload rendered Short as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stories-with-ai-rendered-short
+          path: output/
+          retention-days: 7
