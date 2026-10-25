@@ -74,8 +74,15 @@ jobs:
               headers={"Content-Type": "application/json"},
               method="POST"
           )
+
+          try:
           with urllib.request.urlopen(req, timeout=180) as response:
-              data = json.loads(response.read())
+          data = json.loads(response.read())
+          except urllib.error.HTTPError as exc:
+          error_body = exc.read().decode("utf-8", errors="replace")
+          print(f"Gemini API HTTP error: {exc.code}")
+          print(error_body)
+          raise SystemExit(1)
 
           parts = data["candidates"][0]["content"]["parts"]
           story = json.loads("".join(p.get("text", "") for p in parts))
