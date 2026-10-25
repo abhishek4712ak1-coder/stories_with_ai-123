@@ -1,0 +1,20 @@
+
+name: Stories AI Automation Heartbeat
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check automation schedule
+        run: |
+          echo "Stories With AI automation runner started."
+          echo "UTC time: $(date -u)"
+          echo "Next stage: content generation, video rendering, publishing and analytics."
