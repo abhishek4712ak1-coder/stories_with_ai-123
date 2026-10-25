@@ -32,11 +32,10 @@ jobs:
           from PIL import Image, ImageDraw, ImageFont
 
           api_key = os.environ["GEMINI_API_KEY"]
-          model = "gemini-2.5-flash-lite"
+          model = "gemini-3.5-flash-lite"
           endpoint = (
-              "https://generativelanguage.googleapis.com/v1beta/"
-              f"models/{model}:generateContent?key={api_key}"
-          )
+          "https://generativelanguage.googleapis.com/v1beta/"
+          f"models/{model}:generateContent")
 
           prompt = """
           Create an original Hindi YouTube Short for STORIES WITH AI.
@@ -68,20 +67,21 @@ jobs:
               }
           }
 
+          
           req = urllib.request.Request(
-              endpoint,
-              data=json.dumps(payload).encode(),
-              headers={"Content-Type": "application/json"},
-              method="POST"
-          )
-
+          endpoint + "?key=" + api_key,data=json.dumps(payload).encode("utf-8"),headers={"Content-Type": "application/json"},method="POST")
           try:
           with urllib.request.urlopen(req, timeout=180) as response:
-          data = json.loads(response.read())
+          data = json.loads(response.read().decode("utf-8"))
+
           except urllib.error.HTTPError as exc:
           error_body = exc.read().decode("utf-8", errors="replace")
           print(f"Gemini API HTTP error: {exc.code}")
           print(error_body)
+          raise SystemExit(1)
+  
+          except urllib.error.URLError as exc:
+          print(f"Could not connect to Gemini API: {exc.reason}")
           raise SystemExit(1)
 
           parts = data["candidates"][0]["content"]["parts"]
