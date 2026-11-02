@@ -1,0 +1,164 @@
+name: Upload Hindi Short to YouTube
+
+on:
+  workflow_run:
+    workflows:
+      - Generate and Render Hindi Short
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  upload:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Download rendered video
+        uses: actions/download-artifact@v4
+        with:
+          name: stories-with-ai-rendered-short
+          path: output
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Install YouTube upload dependencies
+        run: |
+          python -m pip install --upgrade \
+            google-api-python-client \
+            google-auth \
+            google-auth-httplib2
+
+      - name: Upload video to YouTube
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        run: |
+          cat > upload.py <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          from google.oauth2.credentials import Credentials
+          from google.auth.transport.requests import Request
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          video_path = Path("output/stories-with-ai-short.mp4")
+          metadata_path = Path("output/upload-metadata.txt")
+
+          if not video_path.exists():
+              raise SystemExit("Rendered MP4 was not found.")
+
+          if not metadata_path.exists():
+              raise SystemExit("Upload metadata was not found.")
+
+          raw = metadata_path.read_text(encoding="utf-8")
+
+          def get_section(name, next_name=None):
+              marker = name + "\n"
+              if marker not in raw:
+                  return ""
+              value = raw.split(marker, 1)[1]
+              if next_name:
+                  value = value.split("\n\n" + next_name, 1)[0]
+              return value.strip()
+
+          title = get_section("TITLE", "DESCRIPTION")
+          description = get_section("DESCRIPTION", "HASHTAGS")
+          hashtags = get_section("HASHTAGS")
+
+          title = title or "नई हिंदी कहानी | STORIES WITH AI #Shorts"
+          description = description or "एक नई हिंदी कहानी।"
+          tags = re.findall(r"#[\w]+", hashtags)
+
+          if "#Shorts" not in tags:
+              tags.append("#Shorts")
+
+          required = [
+              "YOUTUBE_CLIENT_ID",
+              "YOUTUBE_CLIENT_SECRET",
+              "YOUTUBE_REFRESH_TOKEN",
+          ]
+
+          missing = [key for key in required if not os.environ.get(key)]
+          if missing:
+              raise SystemExit(
+                  "Missing GitHub secrets: " + ", ".join(missing)
+              )
+
+          scopes = [
+              "https://www.googleapis.com/auth/youtube.upload"
+          ]
+
+          credentials = Credentials(
+              token=None,
+              refresh_token=os.environ["YOUTUBE_REFRESH_TOKEN"],
+              token_uri="https://oauth2.googleapis.com/token",
+              client_id=os.environ["YOUTUBE_CLIENT_ID"],
+              client_secret=os.environ["YOUTUBE_CLIENT_SECRET"],
+              scopes=scopes,
+          )
+
+          print("Refreshing Google authorization...")
+          credentials.refresh(Request())
+
+          youtube = build(
+              "youtube",
+              "v3",
+              credentials=credentials,
+              cache_discovery=False,
+          )
+
+          body = {
+              "snippet": {
+                  "title": title[:100],
+                  "description": description[:5000],
+                  "tags": tags[:30],
+                  "categoryId": "24",
+              },
+              "status": {
+                  "privacyStatus": "private",
+                  "selfDeclaredMadeForKids": False,
+              },
+          }
+
+          media = MediaFileUpload(
+              str(video_path),
+              mimetype="video/mp4",
+              chunksize=8 * 1024 * 1024,
+              resumable=True,
+          )
+
+          print("Uploading video as PRIVATE...")
+          request = youtube.videos().insert(
+              part="snippet,status",
+              body=body,
+              media_body=media,
+          )
+
+          response = None
+          while response is None:
+              status, response = request.next_chunk()
+              if status:
+                  print(f"Upload progress: {int(status.progress() * 100)}%")
+
+          video_id = response.get("id")
+          if not video_id:
+              raise SystemExit("Upload finished without a video ID.")
+
+          print("SUCCESS: YouTube upload completed.")
+          print("Video ID:", video_id)
+          print("Privacy: PRIVATE")
+          print("Video URL: https://www.youtube.com/watch?v=" + video_id)
+          PY
+
+          python upload.py
