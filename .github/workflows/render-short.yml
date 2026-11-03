@@ -145,11 +145,11 @@ jobs:
               for word in str(text).split():
                   candidate = f"{current} {word}".strip()
                   if draw.textbbox((0, 0), candidate, font=font)[2] > max_width:
-            if current:
-                lines.append(current)
-            current = word
+                      if current:
+                          lines.append(current)
+                      current = word
                   else:
-            current = candidate
+                      current = candidate
               if current:
                   lines.append(current)
               return lines
@@ -199,9 +199,9 @@ jobs:
               out.setparams(params)
               for wav in wav_files:
                   with wave.open(wav, "rb") as inp:
-            if inp.getparams()[:3] != params[:3]:
-                raise RuntimeError("Voice audio formats differ between scenes.")
-            out.writeframes(inp.readframes(inp.getnframes()))
+                      if inp.getparams()[:3] != params[:3]:
+                          raise RuntimeError("Voice audio formats differ between scenes.")
+                      out.writeframes(inp.readframes(inp.getnframes()))
 
           # Render one vertical video clip per scene.
           clips = []
