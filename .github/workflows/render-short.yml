@@ -54,7 +54,7 @@ jobs:
           if not API_KEY:
               raise RuntimeError("GEMINI_API_KEY secret is missing.")
 
-          MODEL = "gemini-3.8-flash"
+          MODEL = "gemini-3.8-flash-lite"
 
           W = 720
           H = 1280
