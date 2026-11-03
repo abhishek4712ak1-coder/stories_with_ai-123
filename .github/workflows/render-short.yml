@@ -12,240 +12,444 @@ permissions:
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
-      - name: Install free rendering tools
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install rendering dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg espeak-ng fonts-noto-core
-          python -m pip install --upgrade pillow
+          sudo apt-get install -y ffmpeg espeak-ng fonts-dejavu-core
+          python -m pip install --upgrade pip
+          python -m pip install pillow
 
-      - name: Generate story and render video
+      - name: Generate and render Hindi story
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           mkdir -p output
-          cat > render.py <<'PY'
-          import json
-          import os
-          import subprocess
-          import urllib.error
-          import urllib.request
-          import wave
-          from pathlib import Path
 
+          cat > render.py <<'PY'
+          import os
+          import json
+          import re
+          import urllib.request
+          import urllib.error
+          import subprocess
+          import textwrap
+          import wave
+
+          from pathlib import Path
           from PIL import Image, ImageDraw, ImageFont
 
           API_KEY = os.environ.get("GEMINI_API_KEY")
+
           if not API_KEY:
-              raise SystemExit("Missing GEMINI_API_KEY GitHub Actions secret.")
+              raise RuntimeError("GEMINI_API_KEY secret is missing.")
 
-          MODEL = "gemini-3.5-flash-lite"
-          ENDPOINT = (
-              "https://generativelanguage.googleapis.com/v1beta/"
-              f"models/{MODEL}:generateContent"
-          )
+          MODEL = "gemini-2.5-flash"
 
-          Path("output").mkdir(parents=True, exist_ok=True)
+          W = 720
+          H = 1280
 
-          PROMPT = """
-          Create an original Hindi YouTube Short for the channel STORIES WITH AI.
-          Return ONLY valid JSON, with no Markdown fences, using this exact structure:
-          {
-            "title": "short Hindi title",
-            "description": "short Hindi description",
-            "hashtags": ["#HindiStory", "#Shorts"],
-            "scenes": [
-              {
-                "narration": "natural Hindi narration for this scene",
-                "caption": "short Hindi caption",
-                "visual_prompt": "short English description of the scene"
-              }
-            ]
-          }
-          Create exactly 6 scenes. Total narration should be about 45 seconds.
-          Use an original plot, consistent characters, and a satisfying twist.
-          No copyrighted characters. Captions should be short.
-          """
-
-          payload = {
-              "contents": [{"parts": [{"text": PROMPT}]}],
-              "generationConfig": {
-                  "responseMimeType": "application/json",
-                  "maxOutputTokens": 5000
-              }
-          }
-          request = urllib.request.Request(
-              ENDPOINT,
-              data=json.dumps(payload).encode("utf-8"),
-              headers={
-                  "Content-Type": "application/json",
-                  "x-goog-api-key": API_KEY
-              },
-              method="POST"
-          )
-
-          try:
-              with urllib.request.urlopen(request, timeout=180) as response:
-                  response_data = json.loads(response.read().decode("utf-8"))
-          except urllib.error.HTTPError as exc:
-              details = exc.read().decode("utf-8", errors="replace")
-              print(f"Gemini API returned HTTP {exc.code}.")
-              print(details)
-              raise SystemExit(1)
-          except urllib.error.URLError as exc:
-              print(f"Could not connect to Gemini API: {exc.reason}")
-              raise SystemExit(1)
-
-          try:
-              parts = response_data["candidates"][0]["content"]["parts"]
-              raw_text = "".join(part.get("text", "") for part in parts).strip()
-              raw_text = raw_text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-              story = json.loads(raw_text)
-          except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-              print("Gemini response was not valid story JSON.")
-              print(json.dumps(response_data, ensure_ascii=False, indent=2)[:6000])
-              raise SystemExit(1) from exc
-
-          scenes = story.get("scenes", [])
-          if len(scenes) < 4:
-              raise SystemExit(f"Gemini returned only {len(scenes)} scenes; expected at least 4.")
-          if not all(scene.get("narration") and scene.get("caption") for scene in scenes):
-              raise SystemExit("Gemini returned one or more incomplete scenes.")
-
-          Path("output/story.json").write_text(
-              json.dumps(story, ensure_ascii=False, indent=2), encoding="utf-8"
-          )
-
-          font_candidates = [
-              Path("/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf"),
-              Path("/usr/share/fonts/opentype/noto/NotoSansDevanagari-Regular.ttf"),
-          ]
-          font_path = next((p for p in font_candidates if p.exists()), None)
-          if font_path is None:
-              matches = list(Path("/usr/share/fonts").rglob("NotoSansDevanagari-Regular.ttf"))
-              if not matches:
-                  raise SystemExit("Hindi font not found. Ensure fonts-noto-core is installed.")
-              font_path = matches[0]
-
-          title_font = ImageFont.truetype(str(font_path), 54)
-          caption_font = ImageFont.truetype(str(font_path), 44)
-          small_font = ImageFont.truetype(str(font_path), 25)
-
-          W, H = 720, 1280
           palette = [
-              (30, 43, 86), (72, 42, 91), (27, 79, 88),
-              (100, 53, 40), (47, 55, 93), (29, 83, 66)
+              (24, 35, 65),
+              (42, 48, 78),
+              (55, 42, 75),
+              (32, 55, 72),
+              (58, 43, 57),
+              (25, 48, 60),
           ]
-          wav_files = []
+
+          output = Path("output")
+          output.mkdir(exist_ok=True)
+
+          font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+          bold_font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+          def load_font(path, size):
+              return ImageFont.truetype(path, size)
+
+          small_font = load_font(font_path, 25)
+          caption_font = load_font(bold_font_path, 34)
+          title_font = load_font(bold_font_path, 48)
+
+          def generate_story():
+              prompt = """
+              Create an original emotional and engaging Hindi animated story
+              for a YouTube Short.
+
+              Return ONLY valid JSON with this exact structure:
+
+              {
+                "title": "Hindi title",
+                "description": "Short Hindi description",
+                "hashtags": ["HindiStory", "AIStory", "Shorts"],
+                "scenes": [
+                  {
+                    "narration": "Hindi narration for this scene",
+                    "caption": "Short Hindi caption",
+                    "visual_prompt": "Short English visual description"
+                  }
+                ]
+              }
+
+              Requirements:
+              - Exactly 6 scenes.
+              - Story must be original.
+              - Narration must be natural Hindi.
+              - Each scene should have approximately 2 sentences.
+              - Captions should be short.
+              - Story must have a strong opening and satisfying ending.
+              - Suitable for a 45 to 60 second YouTube Short.
+              """
+
+              url = (
+                  f"https://generativelanguage.googleapis.com/"
+                  f"v1beta/models/{MODEL}:generateContent?key={API_KEY}"
+              )
+
+              payload = {
+                  "contents": [
+                      {
+                          "parts": [
+                              {"text": prompt}
+                          ]
+                      }
+                  ],
+                  "generationConfig": {
+                      "temperature": 0.9,
+                      "responseMimeType": "application/json"
+                  }
+              }
+
+              request = urllib.request.Request(
+                  url,
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={"Content-Type": "application/json"},
+                  method="POST"
+              )
+
+              try:
+                  with urllib.request.urlopen(request, timeout=180) as response:
+                      result = json.loads(response.read().decode("utf-8"))
+
+              except urllib.error.HTTPError as error:
+                  details = error.read().decode("utf-8", errors="replace")
+                  raise RuntimeError(
+                      f"Gemini API HTTP {error.code}: {details}"
+                  ) from error
+
+              except urllib.error.URLError as error:
+                  raise RuntimeError(
+                      f"Gemini network error: {error}"
+                  ) from error
+
+              try:
+                  content = result["candidates"][0]["content"]["parts"][0]["text"]
+                  story = json.loads(content)
+              except (KeyError, IndexError, json.JSONDecodeError) as error:
+                  raise RuntimeError(
+                      f"Could not parse Gemini response: {result}"
+                  ) from error
+
+              scenes = story.get("scenes", [])
+
+              if len(scenes) != 6:
+                  raise RuntimeError(
+                      f"Expected 6 scenes, received {len(scenes)}."
+                  )
+
+              for index, scene in enumerate(scenes):
+                  for key in ("narration", "caption"):
+                      if not isinstance(scene.get(key), str) or not scene[key].strip():
+                          raise RuntimeError(
+                              f"Scene {index + 1} has missing {key}."
+                          )
+
+              return story
 
           def wrap_text(draw, text, font, max_width):
-              lines, current = [], ""
-              for word in str(text).split():
+              words = str(text).split()
+              lines = []
+              current = ""
+
+              for word in words:
                   candidate = f"{current} {word}".strip()
-                  if draw.textbbox((0, 0), candidate, font=font)[2] > max_width:
-                      if current:
-                          lines.append(current)
+
+                  width = draw.textbbox(
+                      (0, 0), candidate, font=font
+                  )[2]
+
+                  if width > max_width and current:
+                      lines.append(current)
                       current = word
                   else:
                       current = candidate
+
               if current:
                   lines.append(current)
+
               return lines
 
-          for i, scene in enumerate(scenes):
-              narration = scene["narration"].strip()
-              wav = f"output/voice_{i:02d}.wav"
-              subprocess.run(
-                  ["espeak-ng", "-v", "hi", "-s", "145", "-w", wav, narration],
-                  check=True
+          def create_scene_image(scene, index):
+              im = Image.new(
+                  "RGB",
+                  (W, H),
+                  palette[index % len(palette)]
               )
-              wav_files.append(wav)
 
-              im = Image.new("RGB", (W, H), palette[i % len(palette)])
               draw = ImageDraw.Draw(im)
-              draw.ellipse((440, 100, 800, 460), fill=(255, 194, 96))
-              draw.ellipse((-160, 700, 240, 1100), fill=(104, 158, 198))
-              draw.rounded_rectangle(
-                  (35, 35, W - 35, H - 35), radius=30,
-                  outline=(255, 255, 255), width=3
-              )
-              draw.text((55, 70), "STORIES WITH AI", font=small_font, fill="white")
-              draw.text((55, 130), f"SCENE {i + 1}", font=small_font, fill=(255, 220, 140))
 
-              visual_lines = wrap_text(draw, scene.get("visual_prompt", ""), small_font, W - 110)[:5]
+              draw.ellipse(
+                  (440, 100, 800, 460),
+                  fill=(255, 194, 96)
+              )
+
+              draw.ellipse(
+                  (-160, 700, 240, 1100),
+                  fill=(104, 158, 198)
+              )
+
+              draw.rounded_rectangle(
+                  (35, 35, W - 35, H - 35),
+                  radius=30,
+                  outline=(255, 255, 255),
+                  width=3
+              )
+
+              draw.text(
+                  (55, 70),
+                  "STORIES WITH AI",
+                  font=small_font,
+                  fill="white"
+              )
+
+              draw.text(
+                  (55, 130),
+                  f"SCENE {index + 1}",
+                  font=small_font,
+                  fill=(255, 220, 140)
+              )
+
+              visual_lines = wrap_text(
+                  draw,
+                  scene.get("visual_prompt", ""),
+                  small_font,
+                  W - 110
+              )[:5]
+
               y = 260
+
               for line in visual_lines:
-                  draw.text((55, y), line, font=small_font, fill="white")
+                  draw.text(
+                      (55, y),
+                      line,
+                      font=small_font,
+                      fill="white"
+                  )
                   y += 40
 
               draw.rounded_rectangle(
-                  (40, 790, W - 40, 1150), radius=25, fill=(15, 20, 35)
+                  (40, 790, W - 40, 1150),
+                  radius=25,
+                  fill=(15, 20, 35)
               )
-              caption_lines = wrap_text(draw, scene["caption"], caption_font, W - 110)[:5]
+
+              caption_lines = wrap_text(
+                  draw,
+                  scene["caption"],
+                  caption_font,
+                  W - 110
+              )[:5]
+
               y = 850
+
               for line in caption_lines:
-                  draw.text((55, y), line, font=caption_font, fill="white")
+                  draw.text(
+                      (55, y),
+                      line,
+                      font=caption_font,
+                      fill="white"
+                  )
                   y += 65
 
-              im.save(f"output/scene_{i:02d}.png")
+              image_path = output / f"scene_{index:02d}.png"
+              im.save(image_path)
 
-          # Combine the individual speech WAV files into one continuous narration.
-          with wave.open(wav_files[0], "rb") as first:
-              params = first.getparams()
+              return str(image_path)
 
-          with wave.open("output/narration.wav", "wb") as out:
-              out.setparams(params)
-              for wav in wav_files:
-                  with wave.open(wav, "rb") as inp:
-                      if inp.getparams()[:3] != params[:3]:
-                          raise RuntimeError("Voice audio formats differ between scenes.")
-                      out.writeframes(inp.readframes(inp.getnframes()))
+          def create_narration(scene, index):
+              wav_path = output / f"voice_{index:02d}.wav"
 
-          # Render one vertical video clip per scene.
-          clips = []
-          for i, wav in enumerate(wav_files):
-              clip = f"output/clip_{i:02d}.mp4"
-              subprocess.run([
-                  "ffmpeg", "-y", "-loglevel", "error",
-                  "-loop", "1", "-framerate", "25",
-                  "-i", f"output/scene_{i:02d}.png",
-                  "-i", wav,
-                  "-vf", "scale=720:1280,format=yuv420p",
-                  "-c:v", "libx264", "-preset", "ultrafast",
-                  "-tune", "stillimage",
-                  "-c:a", "aac", "-b:a", "96k",
-                  "-shortest", "-movflags", "+faststart", clip
-              ], check=True)
-              clips.append(clip)
+              subprocess.run(
+                  [
+                      "espeak-ng",
+                      "-v", "hi",
+                      "-s", "145",
+                      "-w", str(wav_path),
+                      scene["narration"]
+                  ],
+                  check=True
+              )
 
-          concat_file = Path("output/concat.txt")
-          concat_file.write_text(
-              "".join(f"file '{Path(clip).resolve()}'\n" for clip in clips),
-              encoding="utf-8"
-          )
-          subprocess.run([
-              "ffmpeg", "-y", "-loglevel", "error",
-              "-f", "concat", "-safe", "0", "-i", str(concat_file),
-              "-c:v", "libx264", "-preset", "ultrafast",
-              "-c:a", "aac", "-movflags", "+faststart",
-              "output/stories-with-ai-short.mp4"
-          ], check=True)
+              return str(wav_path)
 
-          metadata = (
-              f"TITLE\n{story.get('title', '')}\n\n"
-              f"DESCRIPTION\n{story.get('description', '')}\n\n"
-              f"HASHTAGS\n{' '.join(story.get('hashtags', []))}\n"
-          )
-          Path("output/upload-metadata.txt").write_text(metadata, encoding="utf-8")
-          print("SUCCESS: output/stories-with-ai-short.mp4")
+          def combine_audio(wav_files):
+              if not wav_files:
+                  raise RuntimeError("No narration files were generated.")
+
+              with wave.open(wav_files[0], "rb") as first:
+                  params = first.getparams()
+
+              with wave.open(str(output / "narration.wav"), "wb") as out:
+                  out.setparams(params)
+
+                  for wav_file in wav_files:
+                      with wave.open(wav_file, "rb") as inp:
+                          if inp.getparams()[:3] != params[:3]:
+                              raise RuntimeError(
+                                  "Voice audio formats differ between scenes."
+                              )
+
+                          out.writeframes(
+                              inp.readframes(inp.getnframes())
+                          )
+
+          def render_video(image_files, wav_files):
+              clips = []
+
+              for index, wav_file in enumerate(wav_files):
+                  clip = output / f"clip_{index:02d}.mp4"
+
+                  subprocess.run(
+                      [
+                          "ffmpeg",
+                          "-y",
+                          "-loglevel", "error",
+                          "-loop", "1",
+                          "-framerate", "25",
+                          "-i", image_files[index],
+                          "-i", wav_file,
+                          "-vf", "scale=720:1280,format=yuv420p",
+                          "-c:v", "libx264",
+                          "-preset", "ultrafast",
+                          "-tune", "stillimage",
+                          "-c:a", "aac",
+                          "-b:a", "96k",
+                          "-shortest",
+                          "-movflags", "+faststart",
+                          str(clip)
+                      ],
+                      check=True
+                  )
+
+                  clips.append(clip)
+
+              concat_file = output / "concat.txt"
+
+              concat_file.write_text(
+                  "".join(
+                      f"file '{clip.resolve()}'\n"
+                      for clip in clips
+                  ),
+                  encoding="utf-8"
+              )
+
+              final_video = output / "stories-with-ai-short.mp4"
+
+              subprocess.run(
+                  [
+                      "ffmpeg",
+                      "-y",
+                      "-loglevel", "error",
+                      "-f", "concat",
+                      "-safe", "0",
+                      "-i", str(concat_file),
+                      "-c:v", "libx264",
+                      "-preset", "ultrafast",
+                      "-c:a", "aac",
+                      "-movflags", "+faststart",
+                      str(final_video)
+                  ],
+                  check=True
+              )
+
+              return final_video
+
+          def save_metadata(story):
+              hashtags = story.get("hashtags", [])
+
+              if not isinstance(hashtags, list):
+                  hashtags = []
+
+              metadata = (
+                  f"TITLE\n{story.get('title', 'Hindi AI Story')}\n\n"
+                  f"DESCRIPTION\n{story.get('description', '')}\n\n"
+                  f"HASHTAGS\n{' '.join(str(tag) for tag in hashtags)}\n"
+              )
+
+              (output / "upload-metadata.txt").write_text(
+                  metadata,
+                  encoding="utf-8"
+              )
+
+          def main():
+              print("Generating Hindi story with Gemini...")
+              story = generate_story()
+
+              image_files = []
+              wav_files = []
+
+              for index, scene in enumerate(story["scenes"]):
+                  print(f"Processing scene {index + 1}/6...")
+
+                  image_files.append(
+                      create_scene_image(scene, index)
+                  )
+
+                  wav_files.append(
+                      create_narration(scene, index)
+                  )
+
+              print("Combining narration...")
+              combine_audio(wav_files)
+
+              print("Rendering final vertical video...")
+              video = render_video(image_files, wav_files)
+
+              save_metadata(story)
+
+              print(f"SUCCESS: {video}")
+              print("SUCCESS: output/upload-metadata.txt")
+
+          if __name__ == "__main__":
+              main()
           PY
+
           python render.py
 
-      - name: Upload rendered Short as artifact
+      - name: Verify generated video
+        run: |
+          test -s output/stories-with-ai-short.mp4
+          test -s output/upload-metadata.txt
+          ffprobe -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            output/stories-with-ai-short.mp4
+
+      - name: Upload rendered video artifact
         uses: actions/upload-artifact@v4
         with:
           name: stories-with-ai-rendered-short
-          path: output/
+          path: |
+            output/stories-with-ai-short.mp4
+            output/upload-metadata.txt
           retention-days: 7
