@@ -25,9 +25,9 @@ jobs:
             - name: Install rendering dependencies
               run: |
                   sudo apt-get update
-                  sudo apt-get install -y ffmpeg espeak-ng fonts-noto-core
+                  sudo apt-get install -y ffmpeg espeak-ng fonts-noto-core fonts-dejavu-core libraqm-dev libfreetype-dev libharfbuzz-dev libfribidi-dev libjpeg-dev zlib1g-dev
                   python -m pip install --upgrade pip
-                  python -m pip install pillow
+                  python -m pip install --no-binary=Pillow pillow
 
             - name: Generate and render Hindi story
               env:
@@ -49,7 +49,7 @@ jobs:
                   from urllib.parse import urlencode, quote
 
                   from pathlib import Path
-                  from PIL import Image, ImageDraw, ImageFont, ImageOps
+                  from PIL import Image, ImageDraw, ImageFont, ImageOps, features
 
                   # --------------------------------------------------
                   # CONFIGURATION
@@ -91,18 +91,49 @@ jobs:
                       "NotoSansDevanagari-Bold.ttf"
                   )
 
-                  if not Path(regular_font_path).exists():
-                      raise RuntimeError("Hindi regular font not found.")
+                  latin_font_path = (
+                      "/usr/share/fonts/truetype/dejavu/"
+                      "DejaVuSans.ttf"
+                  )
 
-                  if not Path(bold_font_path).exists():
-                      raise RuntimeError("Hindi bold font not found.")
+                  latin_bold_font_path = (
+                      "/usr/share/fonts/truetype/dejavu/"
+                      "DejaVuSans-Bold.ttf"
+                  )
 
-                  small_font = ImageFont.truetype(
-                      regular_font_path, 25
+                  for font_path in (
+                      regular_font_path,
+                      bold_font_path,
+                      latin_font_path,
+                      latin_bold_font_path
+                  ):
+                      if not Path(font_path).exists():
+                          raise RuntimeError(
+                              f"Required font not found: {font_path}"
+                          )
+
+                  if not features.check("raqm"):
+                      raise RuntimeError(
+                          "Pillow RAQM support is required for correct "
+                          "Hindi text shaping."
+                      )
+
+                  brand_font = ImageFont.truetype(
+                      latin_bold_font_path,
+                      27,
+                      layout_engine=ImageFont.Layout.RAQM
                   )
 
                   caption_font = ImageFont.truetype(
-                      bold_font_path, 34
+                      bold_font_path,
+                      38,
+                      layout_engine=ImageFont.Layout.RAQM
+                  )
+
+                  visual_font = ImageFont.truetype(
+                      latin_font_path,
+                      25,
+                      layout_engine=ImageFont.Layout.RAQM
                   )
 
                   # --------------------------------------------------
@@ -133,13 +164,21 @@ jobs:
                       }
 
                       Requirements:
-                      - Exactly 6 scenes.
-                      - Story must be original.
-                      - Narration must be natural Hindi.
-                      - Each scene should have approximately 2 sentences.
-                      - Captions should be short.
-                      - Story must have a strong opening.
-                      - Story must have a satisfying and surprising ending.
+                      - Exactly 6 scenes in chronological story order.
+                      - Story must be original and emotionally engaging.
+                      - Narration must be natural, conversational Hindi.
+                      - Each scene should have 1 or 2 concise sentences.
+                      - Total narration should be approximately 90 to 110 Hindi words.
+                      - Captions must be short Hindi phrases, ideally 3 to 7 words.
+                      - Every visual_prompt MUST be written in English.
+                      - Every visual_prompt must describe a specific, searchable photograph.
+                      - Include the main subject, visible action, setting and important objects.
+                      - Describe realistic Indian people, places and environments when appropriate.
+                      - Maintain the same character appearance across all six scenes.
+                      - Prefer cinematic, photorealistic documentary-style imagery.
+                      - Do not request abstract shapes, geometric backgrounds, posters, text or illustrations.
+                      - Do not include written words, signs, subtitles or watermarks in visual_prompt.
+                      - Story must have a strong opening and a satisfying surprising ending.
                       - Suitable for a 45 to 60 second YouTube Short.
                       - Keep the story suitable for all ages.
                       """
@@ -326,28 +365,31 @@ jobs:
 
                   def find_commons_image(scene):
 
-                      search_text = (
-                          str(scene.get("visual_prompt", "")) + " " +
-                          str(scene.get("caption", ""))
-                      ).strip()[:180]
+                      raw_prompt = str(scene.get("visual_prompt", ""))
 
-                      params = {
-                          "action": "query",
-                          "generator": "search",
-                          "gsrsearch": search_text,
-                          "gsrnamespace": 6,
-                          "gsrlimit": 8,
-                          "prop": "imageinfo",
-                          "iiprop": "url|extmetadata",
-                          "iiurlwidth": 1200,
-                          "format": "json",
-                          "formatversion": 2
+                      search_text = re.sub(
+                          r"[^a-zA-Z0-9 ]",
+                          " ",
+                          raw_prompt
+                      )
+
+                      stopwords = {
+                          "the", "and", "with", "from", "that",
+                          "this", "photorealistic", "cinematic",
+                          "documentary", "style", "realistic",
+                          "photo", "photograph"
                       }
 
-                      api_url = (
-                          "https://commons.wikimedia.org/w/api.php?"
-                          + urlencode(params)
-                      )
+                      words = [
+                          word for word in search_text.split()
+                          if len(word) > 2
+                          and word.lower() not in stopwords
+                      ]
+
+                      queries = list(dict.fromkeys([
+                          " ".join(words[:7]),
+                          " ".join(words[:4])
+                      ]))
 
                       headers = {
                           "User-Agent": (
@@ -357,107 +399,186 @@ jobs:
                           )
                       }
 
-                      try:
+                      for search_query in queries:
 
-                          request = urllib.request.Request(
-                              api_url,
-                              headers=headers
+                          if not search_query:
+                              continue
+
+                          print(
+                              "Searching Wikimedia Commons:",
+                              search_query
                           )
 
-                          with urllib.request.urlopen(
-                              request,
-                              timeout=25
-                          ) as response:
-                              data = json.loads(response.read().decode("utf-8"))
+                          params = {
+                              "action": "query",
+                              "generator": "search",
+                              "gsrsearch": search_query,
+                              "gsrnamespace": 6,
+                              "gsrlimit": 15,
+                              "prop": "imageinfo",
+                              "iiprop": "url|extmetadata",
+                              "iiurlwidth": 1200,
+                              "format": "json",
+                              "formatversion": 2
+                          }
 
-                          pages = data.get("query", {}).get("pages", [])
+                          api_url = (
+                              "https://commons.wikimedia.org/w/api.php?"
+                              + urlencode(params)
+                          )
 
-                          for page in pages:
-
-                              image_info = page.get("imageinfo", [])
-
-                              if not image_info:
-                                  continue
-
-                              info = image_info[0]
-                              metadata = info.get("extmetadata", {})
-
-                              def meta_value(key):
-
-                                  value = metadata.get(key, {}).get("value", "")
-
-                                  value = re.sub(
-                                      r"<[^>]+>",
-                                      "",
-                                      str(value)
-                                  )
-
-                                  return html.unescape(value).strip()
-
-                              license_name = meta_value("LicenseShortName")
-                              license_lower = license_name.lower()
-
-                              is_public_domain = (
-                                  "public domain" in license_lower
-                                  or "cc0" in license_lower
-                              )
-
-                              is_cc_by = (
-                                  "cc by" in license_lower
-                                  and "cc by-sa" not in license_lower
-                                  and "cc by-nd" not in license_lower
-                                  and "cc by-nc" not in license_lower
-                              )
-
-                              if not (is_public_domain or is_cc_by):
-                                  continue
-
-                              thumbnail_url = info.get("thumburl")
-
-                              if not thumbnail_url:
-                                  continue
-
-                              image_request = urllib.request.Request(
-                                  thumbnail_url,
+                          try:
+                              request = urllib.request.Request(
+                                  api_url,
                                   headers=headers
                               )
 
                               with urllib.request.urlopen(
-                                  image_request,
+                                  request,
                                   timeout=30
                               ) as response:
-                                  image_data = response.read()
+                                  data = json.loads(
+                                      response.read().decode("utf-8")
+                                  )
 
-                              photo = Image.open(
-                                  BytesIO(image_data)
-                              ).convert("RGB")
-
-                              title = page.get("title", "Wikimedia image")
-
-                              source_url = (
-                                  page.get("canonicalurl")
-                                  or "https://commons.wikimedia.org/wiki/"
-                                  + quote(title.replace(" ", "_"))
+                          except Exception as error:
+                              print(
+                                  "Commons search request failed:",
+                                  str(error)[:200]
                               )
+                              continue
 
-                              credit = {
-                                  "title": title,
-                                  "artist": meta_value("Artist") or "Creator not listed",
-                                  "license": license_name,
-                                  "license_url": meta_value("LicenseUrl"),
-                                  "source": source_url
-                              }
-
-                              print("Wikimedia image found:", title)
-
-                              return photo, credit
-
-                      except Exception as error:
+                          pages = data.get(
+                              "query", {}
+                          ).get("pages", [])
 
                           print(
-                              "Wikimedia image search failed:",
-                              str(error)[:250]
+                              "Wikimedia candidates:",
+                              len(pages)
                           )
+
+                          for page in pages:
+
+                              try:
+                                  image_info = page.get("imageinfo", [])
+
+                                  if not image_info:
+                                      continue
+
+                                  info = image_info[0]
+                                  metadata = info.get(
+                                      "extmetadata", {}
+                                  )
+
+                                  def meta_value(key):
+                                      value = metadata.get(
+                                          key, {}
+                                      ).get("value", "")
+
+                                      value = re.sub(
+                                          r"<[^>]+>",
+                                          "",
+                                          str(value)
+                                      )
+
+                                      return html.unescape(
+                                          value
+                                      ).strip()
+
+                                  license_name = meta_value(
+                                      "LicenseShortName"
+                                  )
+
+                                  license_lower = license_name.lower()
+
+                                  is_public_domain = (
+                                      "public domain" in license_lower
+                                      or "cc0" in license_lower
+                                  )
+
+                                  is_cc_by = (
+                                      "cc by" in license_lower
+                                      and "cc by-sa" not in license_lower
+                                      and "cc by-nd" not in license_lower
+                                      and "cc by-nc" not in license_lower
+                                  )
+
+                                  if not (
+                                      is_public_domain or is_cc_by
+                                  ):
+                                      print(
+                                          "Skipping licence:",
+                                          license_name or "unknown"
+                                      )
+                                      continue
+
+                                  thumbnail_url = info.get("thumburl")
+
+                                  if not thumbnail_url:
+                                      continue
+
+                                  image_request = urllib.request.Request(
+                                      thumbnail_url,
+                                      headers=headers
+                                  )
+
+                                  with urllib.request.urlopen(
+                                      image_request,
+                                      timeout=30
+                                  ) as response:
+                                      image_data = response.read()
+
+                                  photo = Image.open(
+                                      BytesIO(image_data)
+                                  ).convert("RGB")
+
+                                  if (
+                                      photo.width < 500
+                                      or photo.height < 500
+                                  ):
+                                      print("Skipping low-resolution image.")
+                                      continue
+
+                                  title = page.get(
+                                      "title",
+                                      "Wikimedia image"
+                                  )
+
+                                  source_url = (
+                                      page.get("canonicalurl")
+                                      or "https://commons.wikimedia.org/wiki/"
+                                      + quote(title.replace(" ", "_"))
+                                  )
+
+                                  credit = {
+                                      "title": title,
+                                      "artist": (
+                                          meta_value("Artist")
+                                          or "Creator not listed"
+                                      ),
+                                      "license": license_name,
+                                      "license_url": meta_value("LicenseUrl"),
+                                      "source": source_url
+                                  }
+
+                                  print(
+                                      "Usable Wikimedia photograph:",
+                                      title
+                                  )
+
+                                  return photo, credit
+
+                              except Exception as error:
+                                  print(
+                                      "Skipping unusable candidate:",
+                                      str(error)[:180]
+                                  )
+                                  continue
+
+                      print(
+                          "No suitable licensed photograph found "
+                          "for this scene."
+                      )
 
                       return None, None
 
@@ -466,161 +587,114 @@ jobs:
 
                       photo, credit = find_commons_image(scene)
 
-                      if photo is not None:
-
-                          im = ImageOps.fit(
-                              photo,
-                              (W, H),
-                              method=Image.Resampling.LANCZOS
-                          ).convert("RGBA")
-
-                          draw = ImageDraw.Draw(im, "RGBA")
-
-                          # Top branding panel.
-                          draw.rounded_rectangle(
-                              (28, 28, W - 28, 155),
-                              radius=25,
-                              fill=(0, 0, 0, 155)
+                      if photo is None:
+                          raise RuntimeError(
+                              f"No suitable licensed photograph found "
+                              f"for scene {index + 1}. Stopping render "
+                              "instead of creating a geometric fallback."
                           )
+
+                      im = ImageOps.fit(
+                          photo,
+                          (W, H),
+                          method=Image.Resampling.LANCZOS
+                      ).convert("RGBA")
+
+                      draw = ImageDraw.Draw(im, "RGBA")
+
+                      # Top branding panel.
+                      draw.rounded_rectangle(
+                          (28, 28, W - 28, 145),
+                          radius=24,
+                          fill=(0, 0, 0, 165)
+                      )
+
+                      draw.text(
+                          (52, 48),
+                          "STORIES WITH AI",
+                          font=brand_font,
+                          fill=(255, 255, 255, 255)
+                      )
+
+                      draw.text(
+                          (52, 91),
+                          f"SCENE {index + 1}/6",
+                          font=visual_font,
+                          fill=(255, 220, 140, 255)
+                      )
+
+                      # Caption panel at the bottom.
+                      caption = str(scene.get("caption", "")).strip()
+
+                      caption_lines = wrap_text(
+                          draw,
+                          caption,
+                          caption_font,
+                          W - 120
+                      )
+
+                      if not caption_lines or len(caption_lines) > 4:
+                          raise RuntimeError(
+                              f"Caption for scene {index + 1} "
+                              "is empty or too long."
+                          )
+
+                      line_height = 58
+                      panel_height = max(
+                          190,
+                          90 + len(caption_lines) * line_height
+                      )
+
+                      panel_top = H - panel_height - 45
+
+                      draw.rounded_rectangle(
+                          (30, panel_top, W - 30, H - 40),
+                          radius=28,
+                          fill=(0, 0, 0, 205)
+                      )
+
+                      total_text_height = (
+                          len(caption_lines) * line_height
+                      )
+
+                      y = panel_top + (
+                          panel_height - total_text_height
+                      ) // 2
+
+                      for line in caption_lines:
+
+                          bounds = draw.textbbox(
+                              (0, 0),
+                              line,
+                              font=caption_font
+                          )
+
+                          line_width = bounds[2] - bounds[0]
+                          x = (W - line_width) // 2 - bounds[0]
 
                           draw.text(
-                              (55, 52),
-                              "STORIES WITH AI",
-                              font=small_font,
-                              fill="white"
+                              (x, y),
+                              line,
+                              font=caption_font,
+                              fill=(255, 255, 255, 255),
+                              stroke_width=1,
+                              stroke_fill=(0, 0, 0, 255)
                           )
 
-                          draw.text(
-                              (55, 100),
-                              f"SCENE {index + 1}/6",
-                              font=small_font,
-                              fill=(255, 220, 140)
-                          )
+                          y += line_height
 
-                          # Hindi caption panel.
-                          draw.rounded_rectangle(
-                              (35, 850, W - 35, 1190),
-                              radius=28,
-                              fill=(0, 0, 0, 190)
-                          )
-
-                          caption_lines = wrap_text(
-                              draw,
-                              scene.get("caption", ""),
-                              caption_font,
-                              W - 110
-                          )[:4]
-
-                          y = 895
-
-                          for line in caption_lines:
-
-                              draw.text(
-                                  (55, y),
-                                  line,
-                                  font=caption_font,
-                                  fill="white",
-                                  stroke_width=1,
-                                  stroke_fill=(0, 0, 0)
-                              )
-
-                              y += 65
-
-                          image_credits.append(credit)
-
-                      else:
-
-                          # Original fallback design.
-                          im = Image.new(
-                              "RGB",
-                              (W, H),
-                              palette[index % len(palette)]
-                          )
-
-                          draw = ImageDraw.Draw(im)
-
-                          draw.ellipse(
-                              (440, 100, 800, 460),
-                              fill=(255, 194, 96)
-                          )
-
-                          draw.ellipse(
-                              (-160, 700, 240, 1100),
-                              fill=(104, 158, 198)
-                          )
-
-                          draw.rounded_rectangle(
-                              (35, 35, W - 35, H - 35),
-                              radius=30,
-                              outline=(255, 255, 255),
-                              width=3
-                          )
-
-                          draw.text(
-                              (55, 70),
-                              "STORIES WITH AI",
-                              font=small_font,
-                              fill="white"
-                          )
-
-                          draw.text(
-                              (55, 130),
-                              f"SCENE {index + 1}",
-                              font=small_font,
-                              fill=(255, 220, 140)
-                          )
-
-                          visual_lines = wrap_text(
-                              draw,
-                              scene.get("visual_prompt", ""),
-                              small_font,
-                              W - 110
-                          )[:5]
-
-                          y = 260
-
-                          for line in visual_lines:
-
-                              draw.text(
-                                  (55, y),
-                                  line,
-                                  font=small_font,
-                                  fill="white"
-                              )
-
-                              y += 40
-
-                          draw.rounded_rectangle(
-                              (40, 790, W - 40, 1150),
-                              radius=25,
-                              fill=(15, 20, 35)
-                          )
-
-                          caption_lines = wrap_text(
-                              draw,
-                              scene.get("caption", ""),
-                              caption_font,
-                              W - 110
-                          )[:5]
-
-                          y = 850
-
-                          for line in caption_lines:
-
-                              draw.text(
-                                  (55, y),
-                                  line,
-                                  font=caption_font,
-                                  fill="white"
-                              )
-
-                              y += 65
+                      image_credits.append(credit)
 
                       image_path = output / f"scene_{index:02d}.png"
 
                       im.convert("RGB").save(
                           image_path,
                           quality=95
+                      )
+
+                      print(
+                          f"Scene {index + 1}: photograph and "
+                          "Hindi caption rendered."
                       )
 
                       return str(image_path)
@@ -690,66 +764,108 @@ jobs:
 
                   def render_video(image_files, wav_files):
 
-                      clips = []
+                      import math
 
-                      for index, wav_file in enumerate(wav_files):
-
-                          clip = output / f"clip_{index:02d}.mp4"
-
-                          subprocess.run(
-                              [
-                                  "ffmpeg",
-                                  "-y",
-                                  "-loglevel", "error",
-                                  "-loop", "1",
-                                  "-framerate", "25",
-                                  "-i", image_files[index],
-                                  "-i", wav_file,
-                                  "-vf", "scale=720:1280,format=yuv420p",
-                                  "-c:v", "libx264",
-                                  "-preset", "ultrafast",
-                                  "-tune", "stillimage",
-                                  "-c:a", "aac",
-                                  "-b:a", "96k",
-                                  "-shortest",
-                                  "-movflags", "+faststart",
-                                  str(clip)
-                              ],
-                              check=True
+                      if not image_files or not wav_files:
+                          raise RuntimeError(
+                              "Images or narration files are missing."
                           )
 
-                          clips.append(clip)
+                      if len(image_files) != len(wav_files):
+                          raise RuntimeError(
+                              "Image and narration counts do not match."
+                          )
 
-                      concat_file = output / "concat.txt"
+                      narration = output / "narration.wav"
 
-                      concat_file.write_text(
-                          "".join(
-                              f"file '{clip.resolve()}'\n"
-                              for clip in clips
-                          ),
-                          encoding="utf-8"
+                      if not narration.exists():
+                          raise RuntimeError(
+                              "Combined narration.wav was not generated."
+                          )
+
+                      durations = []
+
+                      for wav_file in wav_files:
+
+                          with wave.open(str(wav_file), "rb") as audio:
+                              duration = (
+                                  audio.getnframes() / audio.getframerate()
+                              )
+
+                          if duration <= 0:
+                              raise RuntimeError(
+                                  f"Invalid narration duration: {wav_file}"
+                              )
+
+                          durations.append(duration)
+
+                      command = ["ffmpeg", "-y", "-loglevel", "error"]
+
+                      for index, image_file in enumerate(image_files):
+
+                          duration = durations[index]
+
+                          if index == len(image_files) - 1:
+                              duration += 0.25
+
+                          duration = math.ceil(duration * 25) / 25
+
+                          command.extend([
+                              "-loop", "1",
+                              "-framerate", "25",
+                              "-t", f"{duration:.3f}",
+                              "-i", str(image_file)
+                          ])
+
+                      audio_input_index = len(image_files)
+
+                      command.extend(["-i", str(narration)])
+
+                      filters = []
+
+                      for index in range(len(image_files)):
+
+                          filters.append(
+                              f"[{index}:v]"
+                              "scale=720:1280:"
+                              "force_original_aspect_ratio=increase,"
+                              "crop=720:1280,"
+                              "setsar=1,"
+                              "fps=25,"
+                              "format=yuv420p"
+                              f"[v{index}]"
+                          )
+
+                      video_inputs = "".join(
+                          f"[v{index}]"
+                          for index in range(len(image_files))
+                      )
+
+                      filters.append(
+                          video_inputs
+                          + f"concat=n={len(image_files)}:v=1:a=0[v]"
                       )
 
                       final_video = (
                           output / "stories-with-ai-short.mp4"
                       )
 
-                      subprocess.run(
-                          [
-                              "ffmpeg",
-                              "-y",
-                              "-loglevel", "error",
-                              "-f", "concat",
-                              "-safe", "0",
-                              "-i", str(concat_file),
-                              "-c:v", "libx264",
-                              "-preset", "ultrafast",
-                              "-c:a", "aac",
-                              "-movflags", "+faststart",
-                              str(final_video)
-                          ],
-                          check=True
-                      )
+                      command.extend([
+                          "-filter_complex", ";".join(filters),
+                          "-map", "[v]",
+                          "-map", f"{audio_input_index}:a",
+                          "-c:v", "libx264",
+                          "-preset", "ultrafast",
+                          "-tune", "stillimage",
+                          "-pix_fmt", "yuv420p",
+                          "-c:a", "aac",
+                          "-b:a", "128k",
+                          "-shortest",
+                          "-movflags", "+faststart",
+                          str(final_video)
+                      ])
+
+                      subprocess.run(command, check=True)
 
                       if (
                           not final_video.exists()
@@ -760,10 +876,6 @@ jobs:
                           )
 
                       return final_video
-
-                  # --------------------------------------------------
-                  # SAVE YOUTUBE METADATA
-                  # --------------------------------------------------
 
                   def save_metadata(story):
 
