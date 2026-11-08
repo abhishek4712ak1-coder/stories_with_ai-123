@@ -43,9 +43,13 @@ jobs:
                   import urllib.request
                   import urllib.error
                   import subprocess
+                  import html
+                  import re
+                  from io import BytesIO
+                  from urllib.parse import urlencode, quote
 
                   from pathlib import Path
-                  from PIL import Image, ImageDraw, ImageFont
+                  from PIL import Image, ImageDraw, ImageFont, ImageOps
 
                   # --------------------------------------------------
                   # CONFIGURATION
@@ -318,100 +322,309 @@ jobs:
                   # CREATE SCENE IMAGES
                   # --------------------------------------------------
 
+                  image_credits = []
+
+                  def find_commons_image(scene):
+
+                      search_text = (
+                          str(scene.get("visual_prompt", "")) + " " +
+                          str(scene.get("caption", ""))
+                      ).strip()[:180]
+
+                      params = {
+                          "action": "query",
+                          "generator": "search",
+                          "gsrsearch": search_text,
+                          "gsrnamespace": 6,
+                          "gsrlimit": 8,
+                          "prop": "imageinfo",
+                          "iiprop": "url|extmetadata",
+                          "iiurlwidth": 1200,
+                          "format": "json",
+                          "formatversion": 2
+                      }
+
+                      api_url = (
+                          "https://commons.wikimedia.org/w/api.php?"
+                          + urlencode(params)
+                      )
+
+                      headers = {
+                          "User-Agent": (
+                              "StoriesWithAI/1.0 "
+                              "(https://github.com/abhishek4712ak1-coder/"
+                              "stories_with_ai-123)"
+                          )
+                      }
+
+                      try:
+
+                          request = urllib.request.Request(
+                              api_url,
+                              headers=headers
+                          )
+
+                          with urllib.request.urlopen(
+                              request,
+                              timeout=25
+                          ) as response:
+                              data = json.loads(response.read().decode("utf-8"))
+
+                          pages = data.get("query", {}).get("pages", [])
+
+                          for page in pages:
+
+                              image_info = page.get("imageinfo", [])
+
+                              if not image_info:
+                                  continue
+
+                              info = image_info[0]
+                              metadata = info.get("extmetadata", {})
+
+                              def meta_value(key):
+
+                                  value = metadata.get(key, {}).get("value", "")
+
+                                  value = re.sub(
+                                      r"<[^>]+>",
+                                      "",
+                                      str(value)
+                                  )
+
+                                  return html.unescape(value).strip()
+
+                              license_name = meta_value("LicenseShortName")
+                              license_lower = license_name.lower()
+
+                              is_public_domain = (
+                                  "public domain" in license_lower
+                                  or "cc0" in license_lower
+                              )
+
+                              is_cc_by = (
+                                  "cc by" in license_lower
+                                  and "cc by-sa" not in license_lower
+                                  and "cc by-nd" not in license_lower
+                                  and "cc by-nc" not in license_lower
+                              )
+
+                              if not (is_public_domain or is_cc_by):
+                                  continue
+
+                              thumbnail_url = info.get("thumburl")
+
+                              if not thumbnail_url:
+                                  continue
+
+                              image_request = urllib.request.Request(
+                                  thumbnail_url,
+                                  headers=headers
+                              )
+
+                              with urllib.request.urlopen(
+                                  image_request,
+                                  timeout=30
+                              ) as response:
+                                  image_data = response.read()
+
+                              photo = Image.open(
+                                  BytesIO(image_data)
+                              ).convert("RGB")
+
+                              title = page.get("title", "Wikimedia image")
+
+                              source_url = (
+                                  page.get("canonicalurl")
+                                  or "https://commons.wikimedia.org/wiki/"
+                                  + quote(title.replace(" ", "_"))
+                              )
+
+                              credit = {
+                                  "title": title,
+                                  "artist": meta_value("Artist") or "Creator not listed",
+                                  "license": license_name,
+                                  "license_url": meta_value("LicenseUrl"),
+                                  "source": source_url
+                              }
+
+                              print("Wikimedia image found:", title)
+
+                              return photo, credit
+
+                      except Exception as error:
+
+                          print(
+                              "Wikimedia image search failed:",
+                              str(error)[:250]
+                          )
+
+                      return None, None
+
+
                   def create_scene_image(scene, index):
 
-                      im = Image.new(
-                          "RGB",
-                          (W, H),
-                          palette[index % len(palette)]
-                      )
+                      photo, credit = find_commons_image(scene)
 
-                      draw = ImageDraw.Draw(im)
+                      if photo is not None:
 
-                      draw.ellipse(
-                          (440, 100, 800, 460),
-                          fill=(255, 194, 96)
-                      )
+                          im = ImageOps.fit(
+                              photo,
+                              (W, H),
+                              method=Image.Resampling.LANCZOS
+                          ).convert("RGBA")
 
-                      draw.ellipse(
-                          (-160, 700, 240, 1100),
-                          fill=(104, 158, 198)
-                      )
+                          draw = ImageDraw.Draw(im, "RGBA")
 
-                      draw.rounded_rectangle(
-                          (35, 35, W - 35, H - 35),
-                          radius=30,
-                          outline=(255, 255, 255),
-                          width=3
-                      )
-
-                      draw.text(
-                          (55, 70),
-                          "STORIES WITH AI",
-                          font=small_font,
-                          fill="white"
-                      )
-
-                      draw.text(
-                          (55, 130),
-                          f"SCENE {index + 1}",
-                          font=small_font,
-                          fill=(255, 220, 140)
-                      )
-
-                      visual_lines = wrap_text(
-                          draw,
-                          scene["visual_prompt"],
-                          small_font,
-                          W - 110
-                      )[:5]
-
-                      y = 260
-
-                      for line in visual_lines:
+                          # Top branding panel.
+                          draw.rounded_rectangle(
+                              (28, 28, W - 28, 155),
+                              radius=25,
+                              fill=(0, 0, 0, 155)
+                          )
 
                           draw.text(
-                              (55, y),
-                              line,
+                              (55, 52),
+                              "STORIES WITH AI",
                               font=small_font,
                               fill="white"
                           )
 
-                          y += 40
+                          draw.text(
+                              (55, 100),
+                              f"SCENE {index + 1}/6",
+                              font=small_font,
+                              fill=(255, 220, 140)
+                          )
 
-                      draw.rounded_rectangle(
-                          (40, 790, W - 40, 1150),
-                          radius=25,
-                          fill=(15, 20, 35)
-                      )
+                          # Hindi caption panel.
+                          draw.rounded_rectangle(
+                              (35, 850, W - 35, 1190),
+                              radius=28,
+                              fill=(0, 0, 0, 190)
+                          )
 
-                      caption_lines = wrap_text(
-                          draw,
-                          scene["caption"],
-                          caption_font,
-                          W - 110
-                      )[:5]
+                          caption_lines = wrap_text(
+                              draw,
+                              scene.get("caption", ""),
+                              caption_font,
+                              W - 110
+                          )[:4]
 
-                      y = 850
+                          y = 895
 
-                      for line in caption_lines:
+                          for line in caption_lines:
+
+                              draw.text(
+                                  (55, y),
+                                  line,
+                                  font=caption_font,
+                                  fill="white",
+                                  stroke_width=1,
+                                  stroke_fill=(0, 0, 0)
+                              )
+
+                              y += 65
+
+                          image_credits.append(credit)
+
+                      else:
+
+                          # Original fallback design.
+                          im = Image.new(
+                              "RGB",
+                              (W, H),
+                              palette[index % len(palette)]
+                          )
+
+                          draw = ImageDraw.Draw(im)
+
+                          draw.ellipse(
+                              (440, 100, 800, 460),
+                              fill=(255, 194, 96)
+                          )
+
+                          draw.ellipse(
+                              (-160, 700, 240, 1100),
+                              fill=(104, 158, 198)
+                          )
+
+                          draw.rounded_rectangle(
+                              (35, 35, W - 35, H - 35),
+                              radius=30,
+                              outline=(255, 255, 255),
+                              width=3
+                          )
 
                           draw.text(
-                              (55, y),
-                              line,
-                              font=caption_font,
+                              (55, 70),
+                              "STORIES WITH AI",
+                              font=small_font,
                               fill="white"
                           )
 
-                          y += 65
+                          draw.text(
+                              (55, 130),
+                              f"SCENE {index + 1}",
+                              font=small_font,
+                              fill=(255, 220, 140)
+                          )
+
+                          visual_lines = wrap_text(
+                              draw,
+                              scene.get("visual_prompt", ""),
+                              small_font,
+                              W - 110
+                          )[:5]
+
+                          y = 260
+
+                          for line in visual_lines:
+
+                              draw.text(
+                                  (55, y),
+                                  line,
+                                  font=small_font,
+                                  fill="white"
+                              )
+
+                              y += 40
+
+                          draw.rounded_rectangle(
+                              (40, 790, W - 40, 1150),
+                              radius=25,
+                              fill=(15, 20, 35)
+                          )
+
+                          caption_lines = wrap_text(
+                              draw,
+                              scene.get("caption", ""),
+                              caption_font,
+                              W - 110
+                          )[:5]
+
+                          y = 850
+
+                          for line in caption_lines:
+
+                              draw.text(
+                                  (55, y),
+                                  line,
+                                  font=caption_font,
+                                  fill="white"
+                              )
+
+                              y += 65
 
                       image_path = output / f"scene_{index:02d}.png"
 
-                      im.save(image_path)
+                      im.convert("RGB").save(
+                          image_path,
+                          quality=95
+                      )
 
                       return str(image_path)
 
-                  # --------------------------------------------------
                   # HINDI NARRATION
                   # --------------------------------------------------
 
@@ -559,11 +772,34 @@ jobs:
                       if not isinstance(hashtags, list):
                           hashtags = []
 
+                      description = str(story.get("description", ""))
+
+                      if image_credits:
+
+                          credit_lines = []
+
+                          for index, credit in enumerate(image_credits, 1):
+
+                              credit_lines.append(
+                                  f"{index}. {credit['title']}\n"
+                                  f"   Creator: {credit['artist']}\n"
+                                  f"   License: {credit['license']}\n"
+                                  f"   Source: {credit['source']}\n"
+                                  f"   License details: {credit['license_url']}"
+                              )
+
+                          description += (
+                              "\n\nImage credits:\n"
+                              + "\n\n".join(credit_lines)
+                              + "\n\nImages sourced from Wikimedia Commons. "
+                                "Images have been cropped and captioned for this video."
+                          )
+
                       metadata = (
                           f"TITLE\n"
                           f"{story.get('title', 'Hindi AI Story')}\n\n"
                           f"DESCRIPTION\n"
-                          f"{story.get('description', '')}\n\n"
+                          f"{description}\n\n"
                           f"HASHTAGS\n"
                           f"{' '.join(str(tag) for tag in hashtags)}\n"
                       )
@@ -575,7 +811,6 @@ jobs:
                           encoding="utf-8"
                       )
 
-                  # --------------------------------------------------
                   # MAIN
                   # --------------------------------------------------
 
